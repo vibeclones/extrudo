@@ -1,0 +1,226 @@
+// Extrudo's service worker (ADR-0037). Built into dist/sw.js by
+// pwa/precache-plugin.ts, which fills in VERSION and the file lists.
+//
+// It precaches the whole app at install (the two WASM files included), so a
+// repeat visit, offline or not, never waits for the network, and answers every
+// request from that cache. Hashed files (assets/…) are fetched once and kept
+// across versions; the few files with fixed names are fetched again at every
+// install. An update installs and then waits (ADR-0054: the page shows "A new
+// version is ready" and sends SKIP_WAITING when the person agrees, so it never
+// swaps under an open design); on activation it keeps the previous version's
+// files too, so a tab that is still running the old bundle finds its lazy
+// chunks. The new version's index.html shows on the next navigation.
+//
+// OpenSCAD's WASM (ADR-0071 §4) is not precached: it is 11 MB few designs need.
+// The first fetch of it goes to the network and is kept in a cache of its own,
+// so every later `.scad` import works offline; an update keeps it while the
+// build's hashed name is the same, and drops any other.
+
+/* global self, caches */
+const VERSION = '4a25a6aa573a';
+const HASHED = [
+  "./assets/ConstraintGlyphs-BBHOP_vE.js",
+  "./assets/DimensionLabels-CqSt8G2a.js",
+  "./assets/SelectionOverlay-BqwI1SW-.js",
+  "./assets/SketchOverlay-C3MU2Q88.js",
+  "./assets/Viewport-BabqXxVo.js",
+  "./assets/__vite-browser-external-B28Y8g8N.js",
+  "./assets/__vite-browser-external-BbTE95wW.js",
+  "./assets/allerta-stencil-regular-Bvk_IB_e.ttf",
+  "./assets/b2-storage-box-C9X46_p4.extrudo",
+  "./assets/b4-box-with-lid-BumlVO2-.extrudo",
+  "./assets/b5-pcb-enclosure-NUM2VZbs.extrudo",
+  "./assets/box-with-lid-CCj0kd3H.png",
+  "./assets/browser-BOLRVpe0.js",
+  "./assets/browser-BocIYvR-.js",
+  "./assets/browser-worker-CFopr6Z3.js",
+  "./assets/browser-xSvYd0e5.js",
+  "./assets/camera-PHK5ll-J.js",
+  "./assets/construct-D5iM4VYc.js",
+  "./assets/dimensionLayout-CbnxiUXM.js",
+  "./assets/emscripten-module-NWak2PoB.wasm",
+  "./assets/emscripten-module.browser-BNtHjbWS.js",
+  "./assets/extrudo_occt_single-C2MViHjn.js",
+  "./assets/extrudo_occt_single-C5vtvUhc.wasm",
+  "./assets/ffi-DBVe9U3D.js",
+  "./assets/fredoka-semibold-BHgPcdW0.ttf",
+  "./assets/grid-Ct-iWAyb.js",
+  "./assets/host-B4fZP3HO.js",
+  "./assets/index-BBrtSKjR.css",
+  "./assets/index-DQuDRXZV.js",
+  "./assets/inference-5K65sWL8.js",
+  "./assets/instrument-sans-latin-400-normal-DRC__1Mx.woff2",
+  "./assets/instrument-sans-latin-500-normal-Dk9ku72i.woff2",
+  "./assets/instrument-sans-latin-600-normal-B7fBEWYG.woff2",
+  "./assets/instrument-sans-latin-ext-400-normal-Q_nF8v4l.woff2",
+  "./assets/instrument-sans-latin-ext-500-normal-CTEe1bJa.woff2",
+  "./assets/instrument-sans-latin-ext-600-normal-BsaQcF38.woff2",
+  "./assets/inter-bold-B3C12c2Y.ttf",
+  "./assets/inter-regular-C2t5dCaG.ttf",
+  "./assets/jetbrains-mono-cyrillic-400-normal-BEIGL1Tu.woff2",
+  "./assets/jetbrains-mono-cyrillic-500-normal-DmUKJPL_.woff2",
+  "./assets/jetbrains-mono-greek-400-normal-C190GLew.woff2",
+  "./assets/jetbrains-mono-greek-500-normal-JpySY46c.woff2",
+  "./assets/jetbrains-mono-latin-400-normal-V6pRDFza.woff2",
+  "./assets/jetbrains-mono-latin-500-normal-BWZEU5yA.woff2",
+  "./assets/jetbrains-mono-latin-ext-400-normal-Bc8Ftmh3.woff2",
+  "./assets/jetbrains-mono-latin-ext-500-normal-Cut-4mMH.woff2",
+  "./assets/jetbrains-mono-regular-B_rd5E3W.ttf",
+  "./assets/jsx-runtime-NZYk81nU.js",
+  "./assets/kernelWorker-DQHpywky.js",
+  "./assets/manifold-BE4c7gO-.wasm",
+  "./assets/manifold-_q_SI9fW.js",
+  "./assets/module-6F3E5H7Y-0XFLp3Z5.js",
+  "./assets/navigation-CDAJM8aC.js",
+  "./assets/noto-serif-regular-D7tLHo0h.ttf",
+  "./assets/openscad-BXV8doDw.js",
+  "./assets/pcb-enclosure-BfsYvgn_.png",
+  "./assets/pick-DO28cLK3.js",
+  "./assets/planegcs-Me-TLacO.wasm",
+  "./assets/plugin-file-BSSvJMjr.js",
+  "./assets/pointer-CMV9je5x.js",
+  "./assets/preload-helper-uBIymjUX.js",
+  "./assets/profiles-HwTeezNz.js",
+  "./assets/profiles-lPMcL3wR.js",
+  "./assets/react-Cvdyeg_0.js",
+  "./assets/react-u54ufNxj.js",
+  "./assets/renderMeter-CAyZoQHo.js",
+  "./assets/rolldown-runtime-CbXtAM7H.js",
+  "./assets/rolldown-runtime-hePW80VL.js",
+  "./assets/scriptEditor-Dab9qQ_d.js",
+  "./assets/shapes-BGh3s2Td.js",
+  "./assets/src-BKimHoux.js",
+  "./assets/src-BxStLfT2.js",
+  "./assets/src-KJwm4ELN.js",
+  "./assets/storage-box-DbjcX-Em.png",
+  "./assets/text-BbMLeHYk.js",
+  "./assets/text-DNi-N9dn.js",
+  "./assets/text-FW6ZLZHM.js",
+  "./assets/text-kUizbwHa.js",
+  "./assets/wall-bracket-CQVaKzJ-.png",
+  "./assets/worker-CWefONMt.js"
+];
+const FIXED = [
+  "./favicon.svg",
+  "./icon-192.png",
+  "./icon-512.png",
+  "./index.html",
+  "./manifest.webmanifest"
+];
+// Files cached on first use instead of at install: this build's OpenSCAD WASM.
+const RUNTIME = ["./assets/openscad-BrZABtxO.wasm"];
+
+const CACHE = 'extrudo-precache';
+const RUNTIME_CACHE = 'extrudo-openscad';
+const IS_RUNTIME = /\/assets\/openscad-[^/]+\.wasm$/;
+const INDEX = './index.html';
+// The URLs the previous version precached: this version keeps them one more round.
+const PREVIOUS = './.previous-precache';
+
+const url = (path) => new URL(path, self.location.href).href;
+
+// A host may answer a path through a redirect: Cloudflare Pages sends
+// `/index.html` to `/` with a 308. The response fetch() returns then says
+// `redirected`, and a browser refuses such a response for a navigation
+// (ERR_FAILED on every visit after the first). Store and serve a plain copy.
+const plain = async (response) =>
+  response.redirected
+    ? new Response(await response.blob(), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    : response;
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE);
+      const have = new Set((await cache.keys()).map((request) => request.url));
+      // 'reload' skips the HTTP cache: precached files must be this build's.
+      const add = async (path) => {
+        const response = await fetch(new Request(url(path), { cache: 'reload' }));
+        if (!response.ok) throw new Error(`${path}: ${response.status}`);
+        await cache.put(url(path), await plain(response));
+      };
+      await Promise.all([
+        ...HASHED.filter((path) => !have.has(url(path))).map(add),
+        ...FIXED.map(add),
+      ]);
+      // No skipWaiting() here: a first install activates by itself (nothing to wait
+      // for), an update waits for the page's SKIP_WAITING message.
+    })(),
+  );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE);
+      const previous = await cache
+        .match(url(PREVIOUS))
+        .then((response) => (response ? response.json() : []))
+        .catch(() => []);
+      const current = [...HASHED, ...FIXED].map(url);
+      const keep = new Set([...current, ...previous, url(PREVIOUS)]);
+      for (const request of await cache.keys()) {
+        if (!keep.has(request.url)) await cache.delete(request);
+      }
+      await cache.put(
+        url(PREVIOUS),
+        new Response(JSON.stringify(current), { headers: { 'x-extrudo-version': VERSION } }),
+      );
+      // The runtime cache keeps only what this build would fetch.
+      const runtime = await caches.open(RUNTIME_CACHE);
+      const wanted = new Set(RUNTIME.map(url));
+      for (const request of await runtime.keys()) {
+        if (!wanted.has(request.url)) await runtime.delete(request);
+      }
+      // Caches of other names (an earlier scheme) are never ours to keep.
+      for (const name of await caches.keys()) {
+        if (name !== CACHE && name !== RUNTIME_CACHE) await caches.delete(name);
+      }
+      await self.clients.claim();
+    })(),
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  if (request.method !== 'GET') return;
+  const target = new URL(request.url);
+  if (target.origin !== self.location.origin) return;
+  // The tools' demo clips (P3-12) aren't precached and are range-requested by
+  // <video>: the browser fetches them itself.
+  if (/\/demos\/[^/]+$/.test(target.pathname)) return;
+  // OpenSCAD's WASM: from its own cache, else fetched once and kept (ADR-0071 §4).
+  if (IS_RUNTIME.test(target.pathname)) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(RUNTIME_CACHE);
+        const hit = await cache.match(request.url, { ignoreVary: true });
+        if (hit) return hit;
+        const response = await fetch(request);
+        if (response.ok && !response.redirected) await cache.put(request.url, response.clone());
+        return response;
+      })(),
+    );
+    return;
+  }
+  event.respondWith(
+    (async () => {
+      const cache = await caches.open(CACHE);
+      // Every navigation is the one page: routes are hash routes.
+      // ignoreVary: a host's `Vary: Origin` would otherwise miss module scripts,
+      // whose requests carry an Origin header the precache's requests lack.
+      const hit = await cache.match(request.mode === 'navigate' ? url(INDEX) : request.url, {
+        ignoreVary: true,
+      });
+      return hit ? plain(hit) : fetch(request);
+    })(),
+  );
+});

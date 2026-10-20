@@ -1,0 +1,1 @@
+function e(e){return 10**Math.max(0,Math.ceil(Math.log10(e*12)))}export{e as t};
