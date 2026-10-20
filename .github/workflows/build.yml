@@ -1,0 +1,127 @@
+name: Build upstream releases
+
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many of the newest release tags to consider, or 'taste' to thin the whole history toward the past"
+        required: false
+        default: "3"
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency: build
+
+env:
+  UP: zoltanf/extrudo
+  APP: extrudo
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      # Extrudo's releases carry only desktop installers, but its release tags are the stable web app (its own
+      # deploy workflow builds the web app from a v* tag), so each tag is built here the same way.
+      - name: Find release tags we don't have yet
+        run: |
+          : > todo.txt
+          all=$(gh api --paginate "repos/$UP/tags?per_page=100" --jq '.[].name' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -rV)
+          if [ "${{ inputs.limit || '3' }}" = taste ]; then
+            # Thin the history toward the past (see scripts/pick.py) instead of a hard cutoff.
+            tags=$(gh release list -R "$UP" --limit 400 --exclude-drafts --exclude-pre-releases --json tagName,publishedAt | python3 scripts/pick.py)
+            tags=$(printf '%s\n' "$tags" | grep -Fx -f <(printf '%s\n' "$all") || true)
+            for t in $all; do
+              echo "$tags" | grep -qx -- "$t" || [ -d "v${t#v}" ] || bash scripts/skip.sh add "${t#v}" "Left out to stay within our storage limit; we keep a spread of versions."
+            done
+          else
+            tags=$(printf '%s\n' "$all" | head -n "${{ inputs.limit || '3' }}")
+          fi
+          for tag in $tags; do
+            [ -d "v${tag#v}" ] || echo "$tag" >> todo.txt
+          done
+          cat todo.txt
+          if [ -s todo.txt ]; then echo "NEED=true" >> "$GITHUB_ENV"; fi
+
+      - name: Get the upstream source
+        if: env.NEED == 'true'
+        run: git clone --quiet "https://github.com/$UP.git" up   # full history: the build runs git describe
+
+      - uses: pnpm/action-setup@v4
+        if: env.NEED == 'true'
+        with:
+          package_json_file: up/package.json
+
+      - uses: actions/setup-node@v4
+        if: env.NEED == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: up/pnpm-lock.yaml
+
+      - name: Build each new release
+        if: env.NEED == 'true'
+        run: |
+          while read -r tag; do
+            ver="${tag#v}"
+            echo "::group::Build $tag"
+            rm -rf out
+            ok=0
+            (
+              cd up
+              git checkout --quiet --force "$tag"
+              git clean -fdxq
+              pnpm install --frozen-lockfile
+              # The build downloads the WASM the author published for this commit.
+              pnpm wasm
+              # The stable web app, with relative asset URLs (its vite base is './'), named for this copy's address.
+              EXTRUDO_CHANNEL=stable SITE_URL="https://vibeclones.github.io/$APP/v$ver" pnpm --filter @extrudo/web build
+            ) && ok=1
+            if [ "$ok" = 1 ] && [ -f up/apps/web/dist/index.html ]; then
+              mkdir "v$ver"
+              cp -a up/apps/web/dist/. "v$ver/"
+              cp up/LICENSE* "v$ver/" 2>/dev/null || true
+              printf 'Built from %s at tag %s\nhttps://github.com/%s/tree/%s\nBuilt with upstream'"'"'s own stable web build (pnpm --filter @extrudo/web build). No source changes.\n' "$UP" "$tag" "$UP" "$tag" > "v$ver/SOURCE.txt"
+            else
+              echo "::warning::build failed for $tag"
+            fi
+            echo "::endgroup::"
+          done < todo.txt
+          rm -rf up
+
+      - name: Record versions that could not be hosted
+        run: bash scripts/skip.sh sync todo.txt
+
+      - name: Update latest and versions.json
+        run: |
+          versions=$(find . -maxdepth 1 -type d -name 'v[0-9]*' -printf '%f\n' | sed 's/^v//' | sort -rV)
+          [ -n "$versions" ] || { echo "No versions built"; exit 0; }
+          latest=$(echo "$versions" | head -n1)
+          mkdir -p latest
+          printf '<!doctype html><meta charset="utf-8"><title>%s</title><meta http-equiv="refresh" content="0; url=../v%s/"><link rel="canonical" href="../v%s/"><a href="../v%s/">Open %s %s</a>\n' "$APP" "$latest" "$latest" "$latest" "$APP" "$latest" > latest/index.html
+          echo "$versions" | jq -R . | jq -s --arg latest "$latest" '{latest: $latest, versions: .}' > versions.json
+          cat versions.json
+
+      - name: Keep the site under its size cap
+        run: bash scripts/prune.sh
+
+      - name: Commit and request a Pages build
+        run: |
+          rm -f todo.txt
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing new"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Add upstream release builds"
+          git push
+          gh api -X POST "repos/${{ github.repository }}/pages/builds"
